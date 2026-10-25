@@ -1,0 +1,5 @@
+# dynamic extension
+comment = 'dynamic extension access method'
+default_version = '1.0'
+module_pathname = '$libdir/dynamic_ext'
+relocatable = true

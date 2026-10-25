@@ -1,0 +1,3 @@
+[submodule "external/dynamic-extension"]
+	path = external/dynamic-extension
+	url = https://github.com/XoutDragon/dynamic-extension

@@ -3,7 +3,6 @@
 
 /* postgres.h must come first; keep it in its own block so include sorting can't
  * move it. */
-#include "c.h"
 #include "postgres.h"
 
 #include "dynamic_ext.h"
@@ -24,12 +23,14 @@ PG_MODULE_MAGIC_EXT(.name = "dynamic_ext", .version = PG_VERSION);
 
 PG_FUNCTION_INFO_V1(dynamic_ext);
 
-static void de_index_dir(char *path, Oid dbOid, RelFileNumber relNumber) {
+static void de_index_dir(char *path, Oid dbOid, RelFileNumber relNumber)
+{
   snprintf(path, MAXPGPATH, "%s/dynamic_ext/%u/%u", DataDir, dbOid, relNumber);
 }
 
 static void debuildcallback(Relation index, ItemPointer tid, Datum *values,
-                            bool *isnull, bool tupleIsAlive, void *state) {
+                            bool *isnull, bool tupleIsAlive, void *state)
+{
   DEBuildState *bs = (DEBuildState *)state;
   int32 key;
   uint64 packed_tid;
@@ -49,7 +50,8 @@ static void debuildcallback(Relation index, ItemPointer tid, Datum *values,
 /*
  * Build a new index.
  */
-IndexBuildResult *debuild(Relation heap, Relation index, IndexInfo *indexInfo) {
+IndexBuildResult *debuild(Relation heap, Relation index, IndexInfo *indexInfo)
+{
   IndexBuildResult *result;
   DEBuildState bs;
   double reltuples;
@@ -89,7 +91,8 @@ void debuildempty(Relation index) {}
  */
 bool deinsert(Relation index, Datum *values, bool *isnull, ItemPointer ht_ctid,
               Relation heapRel, IndexUniqueCheck checkUnique,
-              bool indexUnchanged, IndexInfo *indexInfo) {
+              bool indexUnchanged, IndexInfo *indexInfo)
+{
   DEIndex *idx;
   int32 key;
   uint64 packed_tid;
@@ -121,7 +124,8 @@ bool deinsert(Relation index, Datum *values, bool *isnull, ItemPointer ht_ctid,
 IndexBulkDeleteResult *debulkdelete(IndexVacuumInfo *info,
                                     IndexBulkDeleteResult *stats,
                                     IndexBulkDeleteCallback callback,
-                                    void *callback_state) {
+                                    void *callback_state)
+{
   fprintf(stderr, "debulkdelete called at %ld\n", (long)time(NULL));
   if (stats == NULL)
     stats = (IndexBulkDeleteResult *)palloc0(sizeof(IndexBulkDeleteResult));
@@ -132,7 +136,8 @@ IndexBulkDeleteResult *debulkdelete(IndexVacuumInfo *info,
  * Post-VACUUM cleanup.
  */
 IndexBulkDeleteResult *devacuumcleanup(IndexVacuumInfo *info,
-                                       IndexBulkDeleteResult *stats) {
+                                       IndexBulkDeleteResult *stats)
+{
   fprintf(stderr, "devacuumcleanup called at %ld\n", (long)time(NULL));
   if (stats == NULL)
     stats = (IndexBulkDeleteResult *)palloc0(sizeof(IndexBulkDeleteResult));
@@ -145,7 +150,8 @@ IndexBulkDeleteResult *devacuumcleanup(IndexVacuumInfo *info,
 void decostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
                     Cost *indexStartupCost, Cost *indexTotalCost,
                     Selectivity *indexSelectivity, double *indexCorrelation,
-                    double *indexPages) {
+                    double *indexPages)
+{
   fprintf(stderr, "decostestimate called at %ld\n", (long)time(NULL));
   *indexStartupCost = 0;
   *indexTotalCost = 0;
@@ -157,7 +163,8 @@ void decostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 /*
  * Parse reloptions for index.
  */
-bytea *deoptions(Datum reloptions, bool validate) {
+bytea *deoptions(Datum reloptions, bool validate)
+{
   fprintf(stderr, "deoptions called at %ld\n", (long)time(NULL));
   return NULL;
 }
@@ -165,7 +172,9 @@ bytea *deoptions(Datum reloptions, bool validate) {
 /*
  * Validator for opclass.
  */
-bool devalidate(Oid opclassoid) {
+bool devalidate(Oid opclassoid)
+{
+
   fprintf(stderr, "devalidate called at %ld\n", (long)time(NULL));
   return true;
 }
@@ -173,7 +182,8 @@ bool devalidate(Oid opclassoid) {
 /*
  * Begin scan of index.
  */
-IndexScanDesc debeginscan(Relation r, int nkeys, int norderbys) {
+IndexScanDesc debeginscan(Relation r, int nkeys, int norderbys)
+{
   fprintf(stderr, "debeginscan\n");
   IndexScanDesc scan;
   DEScanOpaque so;
@@ -192,7 +202,8 @@ IndexScanDesc debeginscan(Relation r, int nkeys, int norderbys) {
  * Rescan an index.
  */
 void derescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
-              ScanKey orderbys, int norderbys) {
+              ScanKey orderbys, int norderbys)
+{
   fprintf(stderr, "rescan\n");
   DEScanOpaque so = ((DEScanOpaque)scan->opaque);
 
@@ -206,20 +217,24 @@ void derescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
   so->done = false;
 }
 
-bool degettuple(IndexScanDesc scan, ScanDirection dir) {
+bool degettuple(IndexScanDesc scan, ScanDirection dir)
+{
   fprintf(stderr, "gettuple start\n");
   DEScanOpaque so = ((DEScanOpaque)scan->opaque);
   int64 low;
   int64 high;
 
-  if (!so->done) {
+  if (!so->done)
+  {
     low = PG_INT32_MIN;
     high = PG_INT32_MAX;
 
-    for (int i = 0; i < scan->numberOfKeys; i++) {
+    for (int i = 0; i < scan->numberOfKeys; i++)
+    {
       int v;
       v = DatumGetInt32(scan->keyData[i].sk_argument);
-      switch (scan->keyData[i].sk_strategy) {
+      switch (scan->keyData[i].sk_strategy)
+      {
       case 1:
         high = Min(high, v - 1);
         break;
@@ -239,7 +254,8 @@ bool degettuple(IndexScanDesc scan, ScanDirection dir) {
       }
     }
 
-    if (low <= high) {
+    if (low <= high)
+    {
       char path[MAXPGPATH];
       DEIndex *idx;
       Relation index = scan->indexRelation;
@@ -273,7 +289,8 @@ bool degettuple(IndexScanDesc scan, ScanDirection dir) {
 /*
  * End scan of index.
  */
-void deendscan(IndexScanDesc scan) {
+void deendscan(IndexScanDesc scan)
+{
   fprintf(stderr, "endscan\n");
   DEScanOpaque so = ((DEScanOpaque)scan->opaque);
 
@@ -281,7 +298,8 @@ void deendscan(IndexScanDesc scan) {
   pfree(so);
 }
 
-Datum dynamic_ext(PG_FUNCTION_ARGS) {
+Datum dynamic_ext(PG_FUNCTION_ARGS)
+{
   IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);
 
   /*

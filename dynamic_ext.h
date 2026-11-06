@@ -47,8 +47,16 @@ typedef struct DEOptions
 
 typedef DEScanOpaqueData *DEScanOpaque;
 
+/* deutils.c */
 extern Datum dynamic_ext(PG_FUNCTION_ARGS);
+extern void de_index_dir(char *path, Oid dbOid, RelFileNumber relNumber);
+extern DEIndex *de_open_index(Relation index);
+extern void de_close_index(Relation index, DEIndex *idx);
 
+/* devalidate.c */
+extern bool devalidate(Oid opclassoid);
+
+/* index access method interface functions */
 extern IndexBuildResult *debuild(Relation heap, Relation index,
                                  IndexInfo *indexInfo);
 extern void debuildempty(Relation index);
@@ -67,7 +75,6 @@ extern void decostestimate(PlannerInfo *root, IndexPath *path,
                            Cost *indexTotalCost, Selectivity *indexSelectivity,
                            double *indexCorrelation, double *indexPages);
 extern bytea *deoptions(Datum reloptions, bool validate);
-extern bool devalidate(Oid opclassoid);
 extern IndexScanDesc debeginscan(Relation r, int nkeys, int norderbys);
 extern void derescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
                      ScanKey orderbys, int norderbys);

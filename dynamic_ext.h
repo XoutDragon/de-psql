@@ -10,18 +10,40 @@
 #include "nodes/execnodes.h"
 #include "nodes/pathnodes.h"
 
-typedef struct DEBuildState {
+#define DEFAULT_DE_BUFFER_LWM 1000
+#define DEFAULT_DE_BUFFER_HWM 2000
+#define DEFAULT_DE_SCALE_FACTOR 8
+
+#define MIN_DE_BUFFER_LWM 1
+#define MIN_DE_BUFFER_HWM 1
+#define MIN_DE_SCALE_FACTOR 2
+
+#define MAX_DE_BUFFER_LWM 10000000
+#define MAX_DE_BUFFER_HWM 10000000
+#define MAX_DE_SCALE_FACTOR 64
+
+typedef struct DEBuildState 
+{
   DEIndex *idx;
   Relation index;
   double indtuples;
 } DEBuildState;
 
-typedef struct DEScanOpaqueData {
+typedef struct DEScanOpaqueData 
+{
   bool done;  // check if a scan was done.
   uint64 *tids;  // array of tids returned by de_range
   size_t count; // How many tids are in the tid array
   size_t pos;  // index of next TID to return
 } DEScanOpaqueData;
+
+typedef struct DEOptions
+{
+  int32 vl_len_; // header 
+  size_t buffer_lwm;
+  size_t buffer_hwm;
+  size_t scale_factor;
+} DEOptions;
 
 typedef DEScanOpaqueData *DEScanOpaque;
 

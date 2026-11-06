@@ -12,10 +12,15 @@
 #include "de_shim.h"
 
 #include <cerrno>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <limits>
+#include <new>
+#include <stdexcept>
 #include <string>
+#include <sys/types.h>
 #include <vector>
 
 #include <unistd.h>
@@ -61,11 +66,6 @@ typedef de::pl::Query<Shard> Query;
  */
 constexpr size_t PAGE_SZ = 4096;
 constexpr size_t LOOKUP_BUF_SZ = 2 * PAGE_SZ;
-
-/* Buffer and layout parameters for the framework. */
-constexpr size_t DE_BUFFER_LWM = 1000;
-constexpr size_t DE_BUFFER_HWM = 2000;
-constexpr size_t DE_SCALE_FACTOR = 8;
 
 /*
  * Leveling, not tiering: after a checkpoint reload, InternalLevel is sized
@@ -157,7 +157,7 @@ de_create(const char *dir)
 }
 
 extern "C" DEIndex *
-de_open(const char *dir)
+de_open(const char *dir, size_t buffer_lwm, size_t buffer_hwm, size_t scale_factor)
 {
 	DEIndex    *idx = nullptr;
 
@@ -170,7 +170,7 @@ de_open(const char *dir)
 
 	if (rc == 0)
 		rc = in_dir(idx->dir, [&] {
-			idx->ext = new Extension(DE_BUFFER_LWM, DE_BUFFER_HWM, DE_SCALE_FACTOR, 0, 1, false);
+			idx->ext = new Extension(buffer_lwm, buffer_hwm, scale_factor, 0, 1, false);
 		});
 
 	if (rc != 0)
@@ -194,10 +194,9 @@ de_close(DEIndex *idx)
 	 * lists, or the next de_open() finds nothing to load.
 	 */
 	in_dir(idx->dir, [&] {
-		de::isam_keep_files = true;
 		delete idx->ext;
 	});
-	de::isam_keep_files = false;
+
 	free(idx->lookup_buf);
 	delete idx;
 }
@@ -235,6 +234,51 @@ de_range(DEIndex *idx, int64_t low, int64_t high, uint64_t **tids, size_t *count
 			throw std::bad_alloc();
 		memcpy(*tids, found.data(), found.size() * sizeof(uint64_t));
 		*count = found.size();
+	});
+}
+
+extern "C" int
+de_scan_all(DEIndex *idx, int64_t **keys, uint64_t **tids, size_t *count)
+{
+	*keys = nullptr;
+	*tids = nullptr;
+	*count = 0;
+
+	return in_dir(idx->dir, [&] {
+		std::vector<PgRec> found;
+
+		auto it = idx->ext->range_scan({std::numeric_limits<int32_t>::min(), 0}, {std::numeric_limits<int32_t>::max(), 0});
+
+		while (it.has_next()) found.push_back(it.next());
+
+		*keys = (int64_t *) malloc(found.size() * sizeof(int64_t) + 1);
+		*tids = (uint64_t *) malloc(found.size() * sizeof(uint64_t) + 1);
+
+		if (*keys == nullptr || *tids == nullptr)
+		{
+			free(*keys);
+			free(*tids);
+			*keys = nullptr;
+			*tids = nullptr;
+			throw std::bad_alloc();
+		}
+
+		for (size_t i = 0; i < found.size(); i++)
+		{
+			(*keys)[i] = found[i].key;
+			(*tids)[i] = found[i].value;
+		}
+		*count = found.size();
+	});
+}
+
+extern "C" int 
+de_erase(DEIndex *idx, int64_t key, uint64_t tid)
+{
+	return in_dir(idx->dir, [&] {
+		if (!idx->ext->erase({key, tid})) {
+			throw std::runtime_error("dynamic extension buffer is full");
+		}
 	});
 }
 

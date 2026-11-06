@@ -3,7 +3,6 @@
 
 /* postgres.h must come first; keep it in its own block so include sorting can't
  * move it. */
-#include "c.h"
 #include "postgres.h"
 
 #include "dynamic_ext.h"

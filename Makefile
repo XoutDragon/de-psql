@@ -15,7 +15,3 @@ PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 override with_llvm = no
 include $(PGXS)
-
-compile_commands.json:
-	$(MAKE) clean
-	bear -- $(MAKE)

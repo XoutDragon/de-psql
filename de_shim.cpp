@@ -232,7 +232,7 @@ de_range(DEIndex *idx, int64_t low, int64_t high, uint64_t **tids, size_t *count
 
 	return in_dir(idx->dir, [&] {
 		std::vector<uint64_t> found;
-		auto		it = idx->ext->range_scan({low, 0}, {high, 0});
+		auto		it = idx->ext->range_scan({low, 0}, {high, std::numeric_limits<uint64_t>::max()});
 
 		while (it.has_next())
 			found.push_back(it.next().value);
@@ -263,7 +263,7 @@ de_scan_all(DEIndex *idx, int64_t **keys, uint64_t **tids, size_t *count)
 
 		/* keys are int4 values widened to int64, so this covers them all */
 		auto		it = idx->ext->range_scan({std::numeric_limits<int32_t>::min(), 0},
-											  {std::numeric_limits<int32_t>::max(), 0});
+											  {std::numeric_limits<int32_t>::max(), std::numeric_limits<uint64_t>::max()});
 
 		while (it.has_next())
 			found.push_back(it.next());

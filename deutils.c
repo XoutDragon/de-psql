@@ -16,7 +16,6 @@
 #include "storage/lmgr.h"
 #include "storage/lockdefs.h"
 #include "storage/off.h"
-#include "utils/palloc.h"
 #include "utils/rel.h"
 
 PG_FUNCTION_INFO_V1(dynamic_ext);
@@ -228,6 +227,72 @@ void DEBufferAppend(Relation index, const DEBufEntry *e, uint64 flush_seq) {
   UnlockReleaseBuffer(metaBuffer);
 }
 
+DEBufEntry *DEBufferRead(Relation index, uint64 ckpt_flush_seq, int *n) {
+  Buffer metaBuffer;
+  Page metaPage;
+  uint64 flush_seq;
+  BlockNumber npages;
+  DEMetaPageData *metadata;
+  BlockNumber blkno;
+  DEBufEntry *entries;
+  int cap = 64;
+
+  *n = 0;
+
+  metaBuffer = ReadBuffer(index, DE_METAPAGE_BLKNO);
+  LockBuffer(metaBuffer, BUFFER_LOCK_SHARE);
+  metaPage = BufferGetPage(metaBuffer);
+  metadata = (DEMetaPageData *)PageGetContents(metaPage);
+
+  if (metadata->magic != DE_MAGICK_NUMBER) {
+    ereport(ERROR, errmsg("WRONG MAGIC NUMBER"));
+  }
+  flush_seq = metadata->flush_seq;
+  npages = metadata->npages;
+
+  UnlockReleaseBuffer(metaBuffer);
+
+  if (flush_seq > ckpt_flush_seq)
+    ereport(ERROR, (errcode(ERRCODE_INDEX_CORRUPTED),
+                    errmsg("index \"%s\": buffer pages are at flush %llu but "
+                           "checkpoint.json is at %llu",
+                           RelationGetRelationName(index),
+                           (unsigned long long)flush_seq,
+                           (unsigned long long)ckpt_flush_seq),
+                    errhint("REINDEX the index.")));
+
+  if (flush_seq < ckpt_flush_seq)
+    npages = 0;
+
+  entries = palloc(cap * sizeof(DEBufEntry));
+
+  for (blkno = 1; blkno <= npages; blkno++) {
+    Buffer buffer = ReadBuffer(index, blkno);
+    Page page;
+    OffsetNumber off;
+    OffsetNumber maxoff;
+
+    LockBuffer(buffer, BUFFER_LOCK_SHARE);
+    page = BufferGetPage(buffer);
+    maxoff = PageGetMaxOffsetNumber(page);
+
+    for (off = FirstOffsetNumber; off <= maxoff; off++) {
+      Item item = PageGetItem(page, PageGetItemId(page, off));
+
+      if (*n == cap) {
+        cap *= 2;
+        entries = repalloc(entries, cap * sizeof(DEBufEntry));
+      }
+
+      memcpy(&entries[*n], item, sizeof(DEBufEntry));
+      (*n)++;
+    }
+    UnlockReleaseBuffer(buffer);
+  }
+
+  return entries;
+}
+
 void de_index_dir(char *path, Oid dbOid, RelFileNumber relNumber) {
   snprintf(path, MAXPGPATH, "%s/dynamic_ext/%u/%u", DataDir, dbOid, relNumber);
 }
@@ -239,6 +304,8 @@ DEIndex *de_open_index(Relation index) {
   size_t sf = DEFAULT_DE_SCALE_FACTOR;
   char dir[MAXPGPATH];
   DEIndex *idx;
+  DEBufEntry *entries;
+  int n, i;
 
   LockRelation(index, ShareUpdateExclusiveLock);
 
@@ -255,7 +322,18 @@ DEIndex *de_open_index(Relation index) {
     ereport(ERROR, errmsg("Could not open index"));
   }
 
-  elog(NOTICE, "de_open lwm=%d hwm=%d sf=%d", lwm, hwm, sf);
+  entries = DEBufferRead(index, de_flush_seq(idx), &n);
+
+  for (i = 0; i < n; i++) {
+    if (de_replay(idx, entries[i].key, entries[i].tid, entries[i].tombstone) !=
+        0) {
+      de_close_index(index, idx);
+
+      ereport(ERROR, errmsg("dynamic_ext: could not open \"%s\": %s", dir,
+                            de_last_error()));
+    }
+  }
+  pfree(entries);
 
   return idx;
 }

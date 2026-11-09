@@ -13,6 +13,7 @@ static void debuildcallback(Relation index, ItemPointer tid, Datum *values,
   DEBuildState *bs = (DEBuildState *)state;
   int32 key;
   uint64 packed_tid;
+  uint64 seq;
 
   if (isnull[0])
     return;
@@ -22,8 +23,25 @@ static void debuildcallback(Relation index, ItemPointer tid, Datum *values,
   packed_tid = ((uint64)ItemPointerGetBlockNumber(tid) << 16) |
                ItemPointerGetOffsetNumber(tid);
 
-  de_insert(bs->idx, key, packed_tid);
+  if (de_insert(bs->idx, key, packed_tid) != 0)
+    ereport(ERROR,
+            errmsg("dynamic_ext: build insert failed: %s", de_last_error()));
   bs->indtuples += 1;
+
+  seq = de_flush_seq(bs->idx);
+  if (seq != bs->last_seq) {
+    bs->npending = 0;
+    bs->last_seq = seq;
+  }
+
+  if (bs->npending == bs->cap) {
+    bs->cap *= 2;
+    bs->pending = repalloc(bs->pending, bs->cap * sizeof(DEBufEntry));
+  }
+  bs->pending[bs->npending].key = key;
+  bs->pending[bs->npending].tid = packed_tid;
+  bs->pending[bs->npending].tombstone = false;
+  bs->npending++;
 }
 
 /*
@@ -33,20 +51,29 @@ IndexBuildResult *debuild(Relation heap, Relation index, IndexInfo *indexInfo) {
   IndexBuildResult *result;
   DEBuildState bs;
   double reltuples;
-
   char path[MAXPGPATH];
+  int i;
 
   de_index_dir(path, index->rd_locator.dbOid, index->rd_locator.relNumber);
   de_create(path);
   DEInitMetapage(index);
+
   bs.idx = de_open_index(index);
   bs.index = index;
   bs.indtuples = 0;
+  bs.cap = 1024;
+  bs.npending = 0;
+  bs.pending = palloc(bs.cap * sizeof(DEBufEntry));
+  bs.last_seq = de_flush_seq(bs.idx);
 
   // Scan Table
   reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
                                      debuildcallback, (void *)&bs, NULL);
-  // Get callback to insert from the stupid table
+
+  for (i = 0; i < bs.npending; i++)
+    DEBufferAppend(index, &bs.pending[i], bs.last_seq);
+
+  pfree(bs.pending);
 
   de_close_index(index, bs.idx);
   result = palloc_object(IndexBuildResult);

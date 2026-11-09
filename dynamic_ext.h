@@ -22,12 +22,6 @@
 #define MAX_DE_BUFFER_HWM 10000000
 #define MAX_DE_SCALE_FACTOR 64
 
-typedef struct DEBuildState 
-{
-  DEIndex *idx;
-  Relation index;
-  double indtuples;
-} DEBuildState;
 
 typedef struct DEScanOpaqueData 
 {
@@ -62,11 +56,23 @@ typedef struct DEBufEntry {
   bool tombstone;
 } DEBufEntry;
 
+typedef struct DEBuildState 
+{
+  DEIndex *idx;
+  Relation index;
+  double indtuples;
+  DEBufEntry *pending;
+  int npending;
+  int cap;
+  uint64 last_seq;
+} DEBuildState;
+
 
 /* deutils.c */
 extern void DEFillMetapage(Relation index, Page metaPage);
 extern void DEInitMetapage(Relation index);
 extern void DEBufferAppend(Relation index, const DEBufEntry *e, uint64 flush_seq);
+extern DEBufEntry *DEBufferRead(Relation index, uint64 ckpt_flush_seq, int *n);
 extern Datum dynamic_ext(PG_FUNCTION_ARGS);
 extern void de_index_dir(char *path, Oid dbOid, RelFileNumber relNumber);
 extern DEIndex *de_open_index(Relation index);

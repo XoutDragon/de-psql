@@ -12,15 +12,11 @@
 #include "de_shim.h"
 
 #include <cerrno>
-#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <limits>
-#include <new>
-#include <stdexcept>
 #include <string>
-#include <sys/types.h>
 #include <vector>
 
 #include <unistd.h>
@@ -66,6 +62,12 @@ typedef de::pl::Query<Shard> Query;
  */
 constexpr size_t PAGE_SZ = 4096;
 constexpr size_t LOOKUP_BUF_SZ = 2 * PAGE_SZ;
+
+/*
+ * The buffer and layout parameters (buffer_lwm, buffer_hwm, scale_factor)
+ * are no longer constants here: they come from the index's WITH (...)
+ * options, which dynamic_ext.c reads and passes to de_open().
+ */
 
 /*
  * Leveling, not tiering: after a checkpoint reload, InternalLevel is sized
@@ -157,7 +159,8 @@ de_create(const char *dir)
 }
 
 extern "C" DEIndex *
-de_open(const char *dir, size_t buffer_lwm, size_t buffer_hwm, size_t scale_factor)
+de_open(const char *dir, size_t buffer_lwm, size_t buffer_hwm,
+		size_t scale_factor)
 {
 	DEIndex    *idx = nullptr;
 
@@ -170,7 +173,13 @@ de_open(const char *dir, size_t buffer_lwm, size_t buffer_hwm, size_t scale_fact
 
 	if (rc == 0)
 		rc = in_dir(idx->dir, [&] {
-			idx->ext = new Extension(buffer_lwm, buffer_hwm, scale_factor, 0, 1, false);
+			/*
+			 * last argument: use_wal = false.  The framework writes no
+			 * wal.log; its buffer is refilled from the Postgres buffer pages
+			 * with de_replay() instead.
+			 */
+			idx->ext = new Extension(buffer_lwm, buffer_hwm, scale_factor, 0, 1,
+									 false, false);
 		});
 
 	if (rc != 0)
@@ -193,10 +202,10 @@ de_close(DEIndex *idx)
 	 * Closing is not dropping: keep the shard files that checkpoint.json
 	 * lists, or the next de_open() finds nothing to load.
 	 */
+	/* ~ISAMTree() no longer removes files, so closing keeps the shards */
 	in_dir(idx->dir, [&] {
 		delete idx->ext;
 	});
-
 	free(idx->lookup_buf);
 	delete idx;
 }
@@ -237,6 +246,11 @@ de_range(DEIndex *idx, int64_t low, int64_t high, uint64_t **tids, size_t *count
 	});
 }
 
+/*
+ * Every entry in the index, as two parallel malloc'd arrays: keys[i] goes
+ * with tids[i].  The caller must free() both, even when *count is 0.
+ * Used by VACUUM, which has to look at every entry.
+ */
 extern "C" int
 de_scan_all(DEIndex *idx, int64_t **keys, uint64_t **tids, size_t *count)
 {
@@ -247,13 +261,16 @@ de_scan_all(DEIndex *idx, int64_t **keys, uint64_t **tids, size_t *count)
 	return in_dir(idx->dir, [&] {
 		std::vector<PgRec> found;
 
-		auto it = idx->ext->range_scan({std::numeric_limits<int32_t>::min(), 0}, {std::numeric_limits<int32_t>::max(), 0});
+		/* keys are int4 values widened to int64, so this covers them all */
+		auto		it = idx->ext->range_scan({std::numeric_limits<int32_t>::min(), 0},
+											  {std::numeric_limits<int32_t>::max(), 0});
 
-		while (it.has_next()) found.push_back(it.next());
+		while (it.has_next())
+			found.push_back(it.next());
 
+		/* +1 so an empty result is still a real allocation */
 		*keys = (int64_t *) malloc(found.size() * sizeof(int64_t) + 1);
 		*tids = (uint64_t *) malloc(found.size() * sizeof(uint64_t) + 1);
-
 		if (*keys == nullptr || *tids == nullptr)
 		{
 			free(*keys);
@@ -262,7 +279,6 @@ de_scan_all(DEIndex *idx, int64_t **keys, uint64_t **tids, size_t *count)
 			*tids = nullptr;
 			throw std::bad_alloc();
 		}
-
 		for (size_t i = 0; i < found.size(); i++)
 		{
 			(*keys)[i] = found[i].key;
@@ -272,14 +288,56 @@ de_scan_all(DEIndex *idx, int64_t **keys, uint64_t **tids, size_t *count)
 	});
 }
 
-extern "C" int 
+/*
+ * Remove one entry.  With DeletePolicy::TOMBSTONE this does not touch the
+ * shards: it inserts a tombstone {key, tid}, and the next merge drops the
+ * tombstone together with the record it matches.  Matching uses
+ * PgRec::operator==, which compares key AND tid, so only this one row's
+ * entry goes, never another row with the same key.
+ */
+extern "C" int
 de_erase(DEIndex *idx, int64_t key, uint64_t tid)
 {
 	return in_dir(idx->dir, [&] {
-		if (!idx->ext->erase({key, tid})) {
+		/* like insert: returns 0 only when the buffer is at its high watermark */
+		if (!idx->ext->erase({key, tid}))
 			throw std::runtime_error("dynamic extension buffer is full");
-		}
 	});
+}
+
+/*
+ * Put one entry from the Postgres buffer pages back into the extension's
+ * in-memory buffer, without logging (there is no wal.log any more).  Called
+ * for every page entry, oldest first, right after de_open().
+ *
+ * in_dir because a replayed entry can fill the buffer to buffer_lwm, and the
+ * next insert then flushes, which writes shard files.
+ */
+extern "C" int
+de_replay(DEIndex *idx, int64_t key, uint64_t tid, bool tombstone)
+{
+	return in_dir(idx->dir, [&] {
+		int			ok = tombstone ? idx->ext->erase({key, tid}, nullptr, false)
+								   : idx->ext->insert({key, tid}, false);
+
+		if (!ok)
+			throw std::runtime_error("dynamic extension buffer is full during replay");
+	});
+}
+
+/*
+ * How many times the buffer has been flushed into a shard (saved in
+ * checkpoint.json).  Compare it before and after de_insert / de_erase: if it
+ * went up, everything on the Postgres buffer pages is now in a shard.
+ * Reads memory only, so no in_dir.
+ */
+extern "C" uint64_t
+de_flush_seq(DEIndex *idx)
+{
+	uint64_t	seq = 0;
+
+	guarded([&] { seq = idx->ext->get_flush_seq(); });
+	return seq;
 }
 
 /* One TID with this key, if any: a range of a single key. */

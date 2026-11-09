@@ -1,3 +1,4 @@
+#include "de_shim.h"
 #include "postgres.h"
 
 #include "access/tableam.h"
@@ -36,8 +37,8 @@ IndexBuildResult *debuild(Relation heap, Relation index, IndexInfo *indexInfo) {
   char path[MAXPGPATH];
 
   de_index_dir(path, index->rd_locator.dbOid, index->rd_locator.relNumber);
-
   de_create(path);
+  DEInitMetapage(index);
   bs.idx = de_open_index(index);
   bs.index = index;
   bs.indtuples = 0;
@@ -72,6 +73,7 @@ bool deinsert(Relation index, Datum *values, bool *isnull, ItemPointer ht_ctid,
   DEIndex *idx;
   int32 key;
   uint64 packed_tid;
+  DEBufEntry e;
 
   if (isnull[0])
     return false;
@@ -86,6 +88,13 @@ bool deinsert(Relation index, Datum *values, bool *isnull, ItemPointer ht_ctid,
 
     ereport(ERROR, errmsg("Insert into index failed"));
   }
+
+  e.key = key;
+  e.tid = packed_tid;
+  e.tombstone = false;
+
+  DEBufferAppend(index, &e, de_flush_seq(idx));
+
   de_close_index(index, idx);
   /* The function's Boolean result value is significant only when checkUnique is
   UNIQUE_CHECK_PARTIAL. In this case a true result means the new entry is known

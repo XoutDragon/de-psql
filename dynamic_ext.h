@@ -47,7 +47,26 @@ typedef struct DEOptions
 
 typedef DEScanOpaqueData *DEScanOpaque;
 
+typedef struct DEMetaPageData {
+  uint32 magic;  
+  uint64 flush_seq;  
+  BlockNumber npages; 
+} DEMetaPageData;
+
+#define DE_METAPAGE_BLKNO (0)
+#define DE_MAGICK_NUMBER (0xDBAC0DED)
+
+typedef struct DEBufEntry {
+  int32 key;
+  uint64 tid;
+  bool tombstone;
+} DEBufEntry;
+
+
 /* deutils.c */
+extern void DEFillMetapage(Relation index, Page metaPage);
+extern void DEInitMetapage(Relation index);
+extern void DEBufferAppend(Relation index, const DEBufEntry *e, uint64 flush_seq);
 extern Datum dynamic_ext(PG_FUNCTION_ARGS);
 extern void de_index_dir(char *path, Oid dbOid, RelFileNumber relNumber);
 extern DEIndex *de_open_index(Relation index);

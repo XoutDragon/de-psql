@@ -1,13 +1,22 @@
 // This is currently a base that only prints out the functions calls, the
 // arguments, and timestamp
 
+#include "c.h"
+#include "common/relpath.h"
 #include "postgres.h"
 
+#include "access/generic_xlog.h"
 #include "access/reloptions.h"
 #include "dynamic_ext.h"
 #include "miscadmin.h"
+#include "storage/block.h"
+#include "storage/buf.h"
+#include "storage/bufmgr.h"
+#include "storage/bufpage.h"
 #include "storage/lmgr.h"
 #include "storage/lockdefs.h"
+#include "storage/off.h"
+#include "utils/palloc.h"
 #include "utils/rel.h"
 
 PG_FUNCTION_INFO_V1(dynamic_ext);
@@ -120,6 +129,105 @@ Datum dynamic_ext(PG_FUNCTION_ARGS) {
 
   PG_RETURN_POINTER(amroutine);
 }
+
+/*
+ * Fill in metapage for DE index.
+ */
+
+void DEFillMetapage(Relation index, Page metaPage) {
+  DEMetaPageData *metadata;
+
+  PageInit(metaPage, BLCKSZ, 0);
+  metadata = (DEMetaPageData *)PageGetContents(metaPage);
+  metadata->magic = DE_MAGICK_NUMBER;
+  metadata->npages = 0;
+  metadata->flush_seq = 0;
+
+  ((PageHeader)metaPage)->pd_lower += sizeof(DEMetaPageData);
+
+  Assert(((PageHeader)metaPage)->pd_lower <= ((PageHeader)metaPage)->pd_upper);
+}
+
+/*
+ * Initialize metapage for DE index.
+ */
+
+void DEInitMetapage(Relation index) {
+  Buffer metaBuffer;
+  Page metaPage;
+  GenericXLogState *state;
+
+  metaBuffer =
+      ExtendBufferedRel(BMR_REL(index), MAIN_FORKNUM, NULL, EB_LOCK_FIRST);
+  Assert(BufferGetBlockNumber(metaBuffer) == DE_METAPAGE_BLKNO);
+
+  state = GenericXLogStart(index);
+  metaPage =
+      GenericXLogRegisterBuffer(state, metaBuffer, GENERIC_XLOG_FULL_IMAGE);
+
+  DEFillMetapage(index, metaPage);
+  GenericXLogFinish(state);
+  UnlockReleaseBuffer(metaBuffer);
+}
+
+void DEBufferAppend(Relation index, const DEBufEntry *e, uint64 flush_seq) {
+  Buffer metaBuffer;
+  Page metaPage;
+  DEMetaPageData *metadata;
+  GenericXLogState *state;
+  Buffer buffer = InvalidBuffer;
+  Page page = NULL;
+  bool need_new_pages = true;
+
+  metaBuffer = ReadBuffer(index, DE_METAPAGE_BLKNO);
+  LockBuffer(metaBuffer, BUFFER_LOCK_EXCLUSIVE);
+
+  state = GenericXLogStart(index);
+  metaPage = GenericXLogRegisterBuffer(state, metaBuffer, 0);
+  metadata = (DEMetaPageData *)PageGetContents(metaPage);
+
+  if (metadata->flush_seq != flush_seq) {
+    metadata->flush_seq = flush_seq;
+    metadata->npages = 0;
+  }
+
+  if (metadata->npages > 0) {
+    buffer = ReadBuffer(index, metadata->npages);
+    LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+
+    if (PageGetFreeSpace(BufferGetPage(buffer)) >=
+        MAXALIGN(sizeof(DEBufEntry))) {
+      page = GenericXLogRegisterBuffer(state, buffer, 0);
+      need_new_pages = false;
+    } else {
+      UnlockReleaseBuffer(buffer);
+    }
+  }
+
+  if (need_new_pages) {
+    BlockNumber blkno = metadata->npages + 1;
+
+    if (blkno < RelationGetNumberOfBlocks(index)) {
+      buffer = ReadBuffer(index, blkno);
+      LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+    } else {
+      buffer =
+          ExtendBufferedRel(BMR_REL(index), MAIN_FORKNUM, NULL, EB_LOCK_FIRST);
+    }
+
+    page = GenericXLogRegisterBuffer(state, buffer, GENERIC_XLOG_FULL_IMAGE);
+    PageInit(page, BLCKSZ, 0);
+    metadata->npages = blkno;
+  }
+  if (PageAddItem(page, (Item)e, sizeof(DEBufEntry), InvalidOffsetNumber, false,
+                  false) == InvalidOffsetNumber)
+    elog(ERROR, "could not add entry to buffer page");
+
+  GenericXLogFinish(state);
+  UnlockReleaseBuffer(buffer);
+  UnlockReleaseBuffer(metaBuffer);
+}
+
 void de_index_dir(char *path, Oid dbOid, RelFileNumber relNumber) {
   snprintf(path, MAXPGPATH, "%s/dynamic_ext/%u/%u", DataDir, dbOid, relNumber);
 }

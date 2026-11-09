@@ -3,6 +3,7 @@
 
 #include "c.h"
 #include "common/relpath.h"
+#include "de_shim.h"
 #include "postgres.h"
 
 #include "access/generic_xlog.h"
@@ -304,8 +305,9 @@ DEIndex *de_open_index(Relation index) {
   size_t sf = DEFAULT_DE_SCALE_FACTOR;
   char dir[MAXPGPATH];
   DEIndex *idx;
+  uint64 ckpt_seq, seq;
   DEBufEntry *entries;
-  int n, i;
+  int n, i, start;
 
   LockRelation(index, ShareUpdateExclusiveLock);
 
@@ -322,8 +324,11 @@ DEIndex *de_open_index(Relation index) {
     ereport(ERROR, errmsg("Could not open index"));
   }
 
+  ckpt_seq = de_flush_seq(idx);
   entries = DEBufferRead(index, de_flush_seq(idx), &n);
 
+  seq = ckpt_seq;
+  start = 0;
   for (i = 0; i < n; i++) {
     if (de_replay(idx, entries[i].key, entries[i].tid, entries[i].tombstone) !=
         0) {
@@ -332,6 +337,16 @@ DEIndex *de_open_index(Relation index) {
       ereport(ERROR, errmsg("dynamic_ext: could not open \"%s\": %s", dir,
                             de_last_error()));
     }
+
+    if (de_flush_seq(idx) != seq) {
+      seq = de_flush_seq(idx);
+      start = i;
+    }
+  }
+
+  if (seq != ckpt_seq) {
+    for (i = start; i < n; i++)
+      DEBufferAppend(index, &entries[i], seq);
   }
   pfree(entries);
 

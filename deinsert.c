@@ -54,6 +54,10 @@ IndexBuildResult *debuild(Relation heap, Relation index, IndexInfo *indexInfo) {
   char path[MAXPGPATH];
   int i;
 
+  if (index->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED)
+    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    errmsg("dynamic_ext does not support UNLOGGED indexes")));
+
   de_index_dir(path, index->rd_locator.dbOid, index->rd_locator.relNumber);
   de_create(path);
   DEInitMetapage(index);

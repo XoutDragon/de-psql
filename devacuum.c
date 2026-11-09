@@ -1,3 +1,4 @@
+#include "de_shim.h"
 #include "postgres.h"
 
 #include "commands/vacuum.h"
@@ -21,6 +22,7 @@ IndexBulkDeleteResult *debulkdelete(IndexVacuumInfo *info,
   uint64_t *tids;
   size_t count;
   size_t ndead = 0;
+  DEBufEntry e;
 
   if (stats == NULL)
     stats = (IndexBulkDeleteResult *)palloc0(sizeof(IndexBulkDeleteResult));
@@ -54,6 +56,10 @@ IndexBulkDeleteResult *debulkdelete(IndexVacuumInfo *info,
         free(tids);
         ereport(ERROR, (errmsg("could not delete from index")));
       }
+      e.key = (int32)keys[i];
+      e.tid = tids[i];
+      e.tombstone = true;
+      DEBufferAppend(info->index, &e, de_flush_seq(idx));
     }
     de_close_index(info->index, idx);
   }

@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "framework/DynamicExtension.h"
@@ -38,8 +39,8 @@ namespace
  */
 struct PgRec
 {
-	int64_t key;
-	uint64_t value;
+	int64_t		key;
+	uint64_t	value;
 
 	bool operator<(const PgRec &other) const
 	{
@@ -64,12 +65,6 @@ constexpr size_t PAGE_SZ = 4096;
 constexpr size_t LOOKUP_BUF_SZ = 2 * PAGE_SZ;
 
 /*
- * The buffer and layout parameters (buffer_lwm, buffer_hwm, scale_factor)
- * are no longer constants here: they come from the index's WITH (...)
- * options, which dynamic_ext.c reads and passes to de_open().
- */
-
-/*
  * Leveling, not tiering: after a checkpoint reload, InternalLevel is sized
  * to the number of shards it had, so a tiered level has no free slot for the
  * next flush.  Serial scheduler, because a backend must not run work on
@@ -81,8 +76,12 @@ typedef de::DynamicExtension<Shard, Query, de::LayoutPolicy::LEVELING,
 
 std::string last_error;
 
+/* Postgres's working directory (the data directory); it never changes */
+int			home_fd = -1;
+
 template <typename F>
-int guarded(F &&f)
+int
+guarded(F &&f)
 {
 	try
 	{
@@ -100,58 +99,78 @@ int guarded(F &&f)
 	return -1;
 }
 
-/*
- * The framework takes no directory argument: it keeps checkpoint.json,
- * wal.log, shards/ and tmp_shards/ relative to the working directory.  But
- * a Postgres backend must stay in the data directory, because Postgres opens
- * its own files (base/..., pg_wal/...) by relative path too.  So step into
- * the index directory only for the length of one call, and always step back.
- */
-template <typename F>
-int
-in_dir(const std::string &dir, F &&f)
-{
-	char	   *old_dir = getcwd(nullptr, 0);
-
-	if (old_dir == nullptr)
-	{
-		last_error = std::string("cannot read working directory: ") + strerror(errno);
-		return -1;
-	}
-
-	int			rc;
-
-	if (chdir(dir.c_str()) != 0)
-	{
-		last_error = std::string("cannot enter index directory: ") + strerror(errno);
-		rc = -1;
-	}
-	else
-	{
-		rc = guarded(f);
-		if (chdir(old_dir) != 0)
-		{
-			last_error = std::string("cannot return to working directory: ") + strerror(errno);
-			rc = -1;
-		}
-	}
-
-	free(old_dir);
-	return rc;
-}
-
 }								/* namespace */
 
+/*
+ * Defined after the namespace (it needs Extension) and outside it, because
+ * de_shim.h declares it as the global "struct DEIndex".
+ */
 struct DEIndex
 {
 	Extension  *ext;
 	std::byte  *lookup_buf;
 	std::string dir;
+	int			dir_fd;			/* the index folder, opened once in de_open */
 };
+
+namespace
+{
+
+/*
+ * The framework takes no directory argument: it keeps checkpoint.json,
+ * shards/ and tmp_shards/ relative to the working directory.  But a Postgres
+ * backend must stay in the data directory, because Postgres opens its own
+ * files (base/..., pg_wal/...) by relative path too.  So step into the index
+ * directory only for the length of one call, and always step back.
+ *
+ * fchdir on directory fds opened once, not chdir(path): chdir walks every
+ * component of the path in the kernel, twice per call, which was ~20% of
+ * the time of a bulk INSERT.
+ */
+template <typename F>
+int
+in_index_dir(DEIndex *idx, F &&f)
+{
+	if (home_fd < 0 &&
+		(home_fd = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0)
+	{
+		last_error = std::string("cannot open working directory: ") + strerror(errno);
+		return -1;
+	}
+	if (fchdir(idx->dir_fd) != 0)
+	{
+		last_error = std::string("cannot enter index directory: ") + strerror(errno);
+		return -1;
+	}
+
+	int			rc = guarded(f);
+
+	if (fchdir(home_fd) != 0)
+	{
+		last_error = std::string("cannot return to working directory: ") + strerror(errno);
+		rc = -1;
+	}
+	return rc;
+}
+
+/* free everything de_open allocated; safe on a half-built DEIndex */
+void
+free_index(DEIndex *idx)
+{
+	if (idx == nullptr)
+		return;
+	if (idx->dir_fd >= 0)
+		close(idx->dir_fd);
+	free(idx->lookup_buf);
+	delete idx;
+}
+
+}								/* namespace */
 
 extern "C" int
 de_create(const char *dir)
 {
+	/* absolute path, no directory change needed */
 	return guarded([&] {
 		std::filesystem::remove_all(dir);
 		std::filesystem::create_directories(dir);
@@ -164,15 +183,20 @@ de_open(const char *dir, size_t buffer_lwm, size_t buffer_hwm,
 {
 	DEIndex    *idx = nullptr;
 
-	int rc = guarded([&] {
-		idx = new DEIndex{nullptr, nullptr, dir};
+	int			rc = guarded([&] {
+		idx = new DEIndex{nullptr, nullptr, dir, -1};
 		psudb::sf_aligned_alloc(PAGE_SZ, LOOKUP_BUF_SZ, &idx->lookup_buf);
 		if (idx->lookup_buf == nullptr)
 			throw std::bad_alloc();
+
+		idx->dir_fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+		if (idx->dir_fd < 0)
+			throw std::runtime_error(std::string("cannot open index directory: ") +
+									 strerror(errno));
 	});
 
 	if (rc == 0)
-		rc = in_dir(idx->dir, [&] {
+		rc = in_index_dir(idx, [&] {
 			/*
 			 * last argument: use_wal = false.  The framework writes no
 			 * wal.log; its buffer is refilled from the Postgres buffer pages
@@ -184,9 +208,7 @@ de_open(const char *dir, size_t buffer_lwm, size_t buffer_hwm,
 
 	if (rc != 0)
 	{
-		if (idx)
-			free(idx->lookup_buf);
-		delete idx;
+		free_index(idx);
 		return nullptr;
 	}
 	return idx;
@@ -199,21 +221,19 @@ de_close(DEIndex *idx)
 		return;
 
 	/*
-	 * Closing is not dropping: keep the shard files that checkpoint.json
-	 * lists, or the next de_open() finds nothing to load.
+	 * Closing is not dropping: ~ISAMTree() no longer removes files, so the
+	 * shard files that checkpoint.json lists stay for the next de_open().
 	 */
-	/* ~ISAMTree() no longer removes files, so closing keeps the shards */
-	in_dir(idx->dir, [&] {
+	in_index_dir(idx, [&] {
 		delete idx->ext;
 	});
-	free(idx->lookup_buf);
-	delete idx;
+	free_index(idx);
 }
 
 extern "C" int
 de_insert(DEIndex *idx, int64_t key, uint64_t tid)
 {
-	return in_dir(idx->dir, [&] {
+	return in_index_dir(idx, [&] {
 		/* returns 0 only when the buffer is at its high watermark */
 		if (!idx->ext->insert({key, tid}))
 			throw std::runtime_error("dynamic extension buffer is full");
@@ -230,9 +250,10 @@ de_range(DEIndex *idx, int64_t low, int64_t high, uint64_t **tids, size_t *count
 	*tids = nullptr;
 	*count = 0;
 
-	return in_dir(idx->dir, [&] {
+	return in_index_dir(idx, [&] {
 		std::vector<uint64_t> found;
-		auto		it = idx->ext->range_scan({low, 0}, {high, std::numeric_limits<uint64_t>::max()});
+		auto		it = idx->ext->range_scan({low, 0},
+											  {high, std::numeric_limits<uint64_t>::max()});
 
 		while (it.has_next())
 			found.push_back(it.next().value);
@@ -258,12 +279,13 @@ de_scan_all(DEIndex *idx, int64_t **keys, uint64_t **tids, size_t *count)
 	*tids = nullptr;
 	*count = 0;
 
-	return in_dir(idx->dir, [&] {
+	return in_index_dir(idx, [&] {
 		std::vector<PgRec> found;
 
 		/* keys are int4 values widened to int64, so this covers them all */
 		auto		it = idx->ext->range_scan({std::numeric_limits<int32_t>::min(), 0},
-											  {std::numeric_limits<int32_t>::max(), std::numeric_limits<uint64_t>::max()});
+											  {std::numeric_limits<int32_t>::max(),
+											   std::numeric_limits<uint64_t>::max()});
 
 		while (it.has_next())
 			found.push_back(it.next());
@@ -298,7 +320,7 @@ de_scan_all(DEIndex *idx, int64_t **keys, uint64_t **tids, size_t *count)
 extern "C" int
 de_erase(DEIndex *idx, int64_t key, uint64_t tid)
 {
-	return in_dir(idx->dir, [&] {
+	return in_index_dir(idx, [&] {
 		/* like insert: returns 0 only when the buffer is at its high watermark */
 		if (!idx->ext->erase({key, tid}))
 			throw std::runtime_error("dynamic extension buffer is full");
@@ -307,16 +329,15 @@ de_erase(DEIndex *idx, int64_t key, uint64_t tid)
 
 /*
  * Put one entry from the Postgres buffer pages back into the extension's
- * in-memory buffer, without logging (there is no wal.log any more).  Called
- * for every page entry, oldest first, right after de_open().
+ * in-memory buffer, without logging (there is no wal.log any more).
  *
- * in_dir because a replayed entry can fill the buffer to buffer_lwm, and the
- * next insert then flushes, which writes shard files.
+ * In the index directory because a replayed entry can fill the buffer to
+ * buffer_lwm, and the next one then flushes, which writes shard files.
  */
 extern "C" int
 de_replay(DEIndex *idx, int64_t key, uint64_t tid, bool tombstone)
 {
-	return in_dir(idx->dir, [&] {
+	return in_index_dir(idx, [&] {
 		int			ok = tombstone ? idx->ext->erase({key, tid}, nullptr, false)
 								   : idx->ext->insert({key, tid}, false);
 
@@ -327,9 +348,9 @@ de_replay(DEIndex *idx, int64_t key, uint64_t tid, bool tombstone)
 
 /*
  * How many times the buffer has been flushed into a shard (saved in
- * checkpoint.json).  Compare it before and after de_insert / de_erase: if it
- * went up, everything on the Postgres buffer pages is now in a shard.
- * Reads memory only, so no in_dir.
+ * checkpoint.json).  If it went up during de_insert / de_erase, everything
+ * on the Postgres buffer pages is now in a shard.  Reads memory only, so no
+ * directory change.
  */
 extern "C" uint64_t
 de_flush_seq(DEIndex *idx)

@@ -8,7 +8,6 @@
  * Begin scan of index.
  */
 IndexScanDesc debeginscan(Relation r, int nkeys, int norderbys) {
-  fprintf(stderr, "debeginscan\n");
   IndexScanDesc scan;
   DEScanOpaque so;
 
@@ -27,7 +26,6 @@ IndexScanDesc debeginscan(Relation r, int nkeys, int norderbys) {
  */
 void derescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
               ScanKey orderbys, int norderbys) {
-  fprintf(stderr, "rescan\n");
   DEScanOpaque so = ((DEScanOpaque)scan->opaque);
 
   if (scankey && nscankeys > 0)
@@ -44,7 +42,6 @@ void derescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
  * End scan of index.
  */
 void deendscan(IndexScanDesc scan) {
-  fprintf(stderr, "endscan\n");
   DEScanOpaque so = ((DEScanOpaque)scan->opaque);
 
   free(so->tids);
@@ -52,7 +49,6 @@ void deendscan(IndexScanDesc scan) {
 }
 
 bool degettuple(IndexScanDesc scan, ScanDirection dir) {
-  fprintf(stderr, "gettuple start\n");
   DEScanOpaque so = ((DEScanOpaque)scan->opaque);
   int64 low;
   int64 high;
@@ -88,9 +84,9 @@ bool degettuple(IndexScanDesc scan, ScanDirection dir) {
       DEIndex *idx;
       Relation index = scan->indexRelation;
 
-      idx = de_open_index(index);
+      idx = de_acquire_index(index);
       de_range(idx, low, high, &so->tids, &so->count);
-      de_close_index(scan->indexRelation, idx);
+      de_release_index(scan->indexRelation, idx);
     }
 
     so->pos = 0;

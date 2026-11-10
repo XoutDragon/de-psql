@@ -27,12 +27,12 @@ IndexBulkDeleteResult *debulkdelete(IndexVacuumInfo *info,
   if (stats == NULL)
     stats = (IndexBulkDeleteResult *)palloc0(sizeof(IndexBulkDeleteResult));
 
-  idx = de_open_index(info->index);
+  idx = de_acquire_index(info->index);
   if (de_scan_all(idx, &keys, &tids, &count) != 0) {
-    de_close_index(info->index, idx);
+    de_discard_index(info->index, idx);
     ereport(ERROR, (errmsg("could not read from index")));
   }
-  de_close_index(info->index, idx);
+  de_release_index(info->index, idx);
 
   for (int i = 0; i < count; i++) {
     ItemPointerData tid;
@@ -48,10 +48,10 @@ IndexBulkDeleteResult *debulkdelete(IndexVacuumInfo *info,
   }
 
   if (ndead > 0) {
-    idx = de_open_index(info->index);
+    idx = de_acquire_index(info->index);
     for (int i = 0; i < ndead; i++) {
       if (de_erase(idx, keys[i], tids[i]) != 0) {
-        de_close_index(info->index, idx);
+        de_discard_index(info->index, idx);
         free(keys);
         free(tids);
         ereport(ERROR, (errmsg("could not delete from index")));
@@ -60,8 +60,9 @@ IndexBulkDeleteResult *debulkdelete(IndexVacuumInfo *info,
       e.tid = tids[i];
       e.tombstone = true;
       DEBufferAppend(info->index, &e, de_flush_seq(idx));
+      de_cache_sync(info->index);
     }
-    de_close_index(info->index, idx);
+    de_release_index(info->index, idx);
   }
 
   free(keys);
@@ -91,13 +92,13 @@ IndexBulkDeleteResult *devacuumcleanup(IndexVacuumInfo *info,
   if (stats != NULL)
     return stats;
 
-  idx = de_open_index(info->index);
+  idx = de_acquire_index(info->index);
   if (de_scan_all(idx, &keys, &tids, &count) != 0) {
-    de_close_index(info->index, idx);
+    de_discard_index(info->index, idx);
     ereport(ERROR, (errmsg("could not read index")));
   }
 
-  de_close_index(info->index, idx);
+  de_release_index(info->index, idx);
   free(keys);
   free(tids);
 

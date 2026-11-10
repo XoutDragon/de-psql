@@ -6,7 +6,8 @@ OBJS = \
 	deutils.o \
 	devacuum.o \
 	devalidate.o \
-	de_shim.o
+	de_shim.o \
+	de_cache.o
 EXTENSION = dynamic_ext
 DATA = dynamic_ext--1.0.sql
 PGFILEDESC = "dynamic_ext - a dynamic extension for PostgreSQL"

@@ -9,6 +9,7 @@
 #include "fmgr.h"
 #include "nodes/execnodes.h"
 #include "nodes/pathnodes.h"
+#include "storage/block.h"
 
 #define DEFAULT_DE_BUFFER_LWM 1000
 #define DEFAULT_DE_BUFFER_HWM 2000
@@ -45,10 +46,13 @@ typedef struct DEMetaPageData {
   uint32 magic;  
   uint64 flush_seq;  
   BlockNumber npages; 
+  uint32 epoch;
 } DEMetaPageData;
 
 #define DE_METAPAGE_BLKNO (0)
 #define DE_MAGICK_NUMBER (0xDBAC0DED)
+#define DE_ENTRIES_PER_PAGE \
+  ((BLCKSZ - SizeOfPageHeaderData) / (MAXALIGN(sizeof(DEBufEntry)) + sizeof(ItemIdData)))
 
 typedef struct DEBufEntry {
   int32 key;
@@ -72,11 +76,15 @@ typedef struct DEBuildState
 extern void DEFillMetapage(Relation index, Page metaPage);
 extern void DEInitMetapage(Relation index);
 extern void DEBufferAppend(Relation index, const DEBufEntry *e, uint64 flush_seq);
-extern DEBufEntry *DEBufferRead(Relation index, uint64 ckpt_flush_seq, int *n);
+extern void DEReadMeta(Relation index, uint64 *flush_seq, uint32 *nentries, BlockNumber *npages, uint32 *epoch);
+extern DEBufEntry *DEBufferRead(Relation index, uint64 ckpt_flush_seq, uint32 skip, int *n);
+extern void DEBumpEpoch(Relation index);
 extern Datum dynamic_ext(PG_FUNCTION_ARGS);
+extern DEIndex *de_acquire_index(Relation index);
+void de_cache_sync(Relation index);
+extern void de_release_index(Relation index, DEIndex *idx);
+extern void de_discard_index(Relation index, DEIndex *idx);
 extern void de_index_dir(char *path, Oid dbOid, RelFileNumber relNumber);
-extern DEIndex *de_open_index(Relation index);
-extern void de_close_index(Relation index, DEIndex *idx);
 
 /* devalidate.c */
 extern bool devalidate(Oid opclassoid);

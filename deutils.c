@@ -1,9 +1,3 @@
-// This is currently a base that only prints out the functions calls, the
-// arguments, and timestamp
-
-#include "c.h"
-#include "common/relpath.h"
-#include "de_shim.h"
 #include "postgres.h"
 
 #include "access/generic_xlog.h"
@@ -14,10 +8,10 @@
 #include "storage/buf.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
-#include "storage/lmgr.h"
 #include "storage/lockdefs.h"
 #include "storage/off.h"
 #include "utils/rel.h"
+#include <stdbool.h>
 
 PG_FUNCTION_INFO_V1(dynamic_ext);
 
@@ -142,10 +136,25 @@ void DEFillMetapage(Relation index, Page metaPage) {
   metadata->magic = DE_MAGICK_NUMBER;
   metadata->npages = 0;
   metadata->flush_seq = 0;
+  metadata->epoch = 0;
 
   ((PageHeader)metaPage)->pd_lower += sizeof(DEMetaPageData);
 
   Assert(((PageHeader)metaPage)->pd_lower <= ((PageHeader)metaPage)->pd_upper);
+}
+
+void DEBumpEpoch(Relation index) {
+  Buffer metaBuffer = ReadBuffer(index, DE_METAPAGE_BLKNO);
+  GenericXLogState *state;
+  DEMetaPageData *metadata;
+
+  LockBuffer(metaBuffer, BUFFER_LOCK_EXCLUSIVE);
+  state = GenericXLogStart(index);
+  metadata = (DEMetaPageData *)PageGetContents(
+      GenericXLogRegisterBuffer(state, metaBuffer, 0));
+  metadata->epoch++;
+  GenericXLogFinish(state);
+  UnlockReleaseBuffer(metaBuffer);
 }
 
 /*
@@ -172,40 +181,41 @@ void DEInitMetapage(Relation index) {
 
 void DEBufferAppend(Relation index, const DEBufEntry *e, uint64 flush_seq) {
   Buffer metaBuffer;
-  Page metaPage;
-  DEMetaPageData *metadata;
-  GenericXLogState *state;
   Buffer buffer = InvalidBuffer;
   Page page = NULL;
-  bool need_new_pages = true;
+  DEMetaPageData *metadata;
+  GenericXLogState *state;
+  BlockNumber npages;
 
   metaBuffer = ReadBuffer(index, DE_METAPAGE_BLKNO);
   LockBuffer(metaBuffer, BUFFER_LOCK_EXCLUSIVE);
+  metadata = (DEMetaPageData *)PageGetContents(BufferGetPage(metaBuffer));
+  if (metadata->magic != DE_MAGICK_NUMBER)
+    elog(ERROR, "dynamic_ext: index \"%s\" has no metapage",
+         RelationGetRelationName(index));
+
+  npages = (metadata->flush_seq == flush_seq) ? metadata->npages : 0;
 
   state = GenericXLogStart(index);
-  metaPage = GenericXLogRegisterBuffer(state, metaBuffer, 0);
-  metadata = (DEMetaPageData *)PageGetContents(metaPage);
 
-  if (metadata->flush_seq != flush_seq) {
-    metadata->flush_seq = flush_seq;
-    metadata->npages = 0;
-  }
-
-  if (metadata->npages > 0) {
-    buffer = ReadBuffer(index, metadata->npages);
+  if (npages > 0) {
+    buffer = ReadBuffer(index, npages);
     LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
-
-    if (PageGetFreeSpace(BufferGetPage(buffer)) >=
-        MAXALIGN(sizeof(DEBufEntry))) {
+    if (PageGetFreeSpace(BufferGetPage(buffer)) >= MAXALIGN(sizeof(DEBufEntry)))
       page = GenericXLogRegisterBuffer(state, buffer, 0);
-      need_new_pages = false;
-    } else {
+    else {
       UnlockReleaseBuffer(buffer);
+      buffer = InvalidBuffer;
     }
   }
 
-  if (need_new_pages) {
-    BlockNumber blkno = metadata->npages + 1;
+  if (page == NULL) {
+    BlockNumber blkno = npages + 1;
+    Page metaPage = GenericXLogRegisterBuffer(state, metaBuffer, 0);
+
+    metadata = (DEMetaPageData *)PageGetContents(metaPage);
+    metadata->flush_seq = flush_seq;
+    metadata->npages = blkno;
 
     if (blkno < RelationGetNumberOfBlocks(index)) {
       buffer = ReadBuffer(index, blkno);
@@ -214,31 +224,25 @@ void DEBufferAppend(Relation index, const DEBufEntry *e, uint64 flush_seq) {
       buffer =
           ExtendBufferedRel(BMR_REL(index), MAIN_FORKNUM, NULL, EB_LOCK_FIRST);
     }
-
     page = GenericXLogRegisterBuffer(state, buffer, GENERIC_XLOG_FULL_IMAGE);
     PageInit(page, BLCKSZ, 0);
-    metadata->npages = blkno;
   }
+
   if (PageAddItem(page, (Item)e, sizeof(DEBufEntry), InvalidOffsetNumber, false,
-                  false) == InvalidOffsetNumber)
-    elog(ERROR, "could not add entry to buffer page");
+                  false) == InvalidOffsetNumber) {
+    elog(ERROR, "dynamic_ext: could not add entry to buffer page");
+  }
 
   GenericXLogFinish(state);
   UnlockReleaseBuffer(buffer);
   UnlockReleaseBuffer(metaBuffer);
 }
 
-DEBufEntry *DEBufferRead(Relation index, uint64 ckpt_flush_seq, int *n) {
+void DEReadMeta(Relation index, uint64 *flush_seq, uint32 *nentries,
+                BlockNumber *npages, uint32 *epoch) {
   Buffer metaBuffer;
   Page metaPage;
-  uint64 flush_seq;
-  BlockNumber npages;
   DEMetaPageData *metadata;
-  BlockNumber blkno;
-  DEBufEntry *entries;
-  int cap = 64;
-
-  *n = 0;
 
   metaBuffer = ReadBuffer(index, DE_METAPAGE_BLKNO);
   LockBuffer(metaBuffer, BUFFER_LOCK_SHARE);
@@ -246,12 +250,40 @@ DEBufEntry *DEBufferRead(Relation index, uint64 ckpt_flush_seq, int *n) {
   metadata = (DEMetaPageData *)PageGetContents(metaPage);
 
   if (metadata->magic != DE_MAGICK_NUMBER) {
-    ereport(ERROR, errmsg("WRONG MAGIC NUMBER"));
+    ereport(ERROR, (errcode(ERRCODE_INDEX_CORRUPTED),
+                    errmsg("index \"%s\" has no dynamic_ext metapage",
+                           RelationGetRelationName(index)),
+                    errhint("REINDEX the index.")));
   }
-  flush_seq = metadata->flush_seq;
-  npages = metadata->npages;
+  *flush_seq = metadata->flush_seq;
+  *npages = metadata->npages;
+  *epoch = metadata->epoch;
+  *nentries = 0;
+  if (*npages > 0) {
+    Buffer buf = ReadBuffer(index, *npages);
 
+    LockBuffer(buf, BUFFER_LOCK_SHARE);
+    *nentries = (*npages - 1) * DE_ENTRIES_PER_PAGE +
+                PageGetMaxOffsetNumber(BufferGetPage(buf));
+    UnlockReleaseBuffer(buf);
+  }
   UnlockReleaseBuffer(metaBuffer);
+}
+
+DEBufEntry *DEBufferRead(Relation index, uint64 ckpt_flush_seq, uint32 skip,
+                         int *n) {
+  uint64 flush_seq;
+  BlockNumber npages;
+  uint32 nentries;
+  BlockNumber blkno;
+  DEBufEntry *entries;
+  int cap = 64;
+  uint32 seen = 0;
+  uint32 epoch;
+
+  *n = 0;
+
+  DEReadMeta(index, &flush_seq, &nentries, &npages, &epoch);
 
   if (flush_seq > ckpt_flush_seq)
     ereport(ERROR, (errcode(ERRCODE_INDEX_CORRUPTED),
@@ -278,7 +310,12 @@ DEBufEntry *DEBufferRead(Relation index, uint64 ckpt_flush_seq, int *n) {
     maxoff = PageGetMaxOffsetNumber(page);
 
     for (off = FirstOffsetNumber; off <= maxoff; off++) {
-      Item item = PageGetItem(page, PageGetItemId(page, off));
+      Item item;
+
+      if (seen++ < skip)
+        continue;
+
+      item = PageGetItem(page, PageGetItemId(page, off));
 
       if (*n == cap) {
         cap *= 2;
@@ -296,66 +333,6 @@ DEBufEntry *DEBufferRead(Relation index, uint64 ckpt_flush_seq, int *n) {
 
 void de_index_dir(char *path, Oid dbOid, RelFileNumber relNumber) {
   snprintf(path, MAXPGPATH, "%s/dynamic_ext/%u/%u", DataDir, dbOid, relNumber);
-}
-
-DEIndex *de_open_index(Relation index) {
-  DEOptions *rdopts = (DEOptions *)index->rd_options;
-  size_t lwm = DEFAULT_DE_BUFFER_LWM;
-  size_t hwm = DEFAULT_DE_BUFFER_HWM;
-  size_t sf = DEFAULT_DE_SCALE_FACTOR;
-  char dir[MAXPGPATH];
-  DEIndex *idx;
-  uint64 ckpt_seq, seq;
-  DEBufEntry *entries;
-  int n, i, start;
-
-  LockRelation(index, ShareUpdateExclusiveLock);
-
-  if (rdopts != NULL) {
-    lwm = rdopts->buffer_lwm;
-    hwm = rdopts->buffer_hwm;
-    sf = rdopts->scale_factor;
-  }
-
-  de_index_dir(dir, index->rd_locator.dbOid, index->rd_locator.relNumber);
-  idx = de_open(dir, lwm, hwm, sf);
-
-  if (idx == NULL) {
-    ereport(ERROR, errmsg("Could not open index"));
-  }
-
-  ckpt_seq = de_flush_seq(idx);
-  entries = DEBufferRead(index, de_flush_seq(idx), &n);
-
-  seq = ckpt_seq;
-  start = 0;
-  for (i = 0; i < n; i++) {
-    if (de_replay(idx, entries[i].key, entries[i].tid, entries[i].tombstone) !=
-        0) {
-      de_close_index(index, idx);
-
-      ereport(ERROR, errmsg("dynamic_ext: could not open \"%s\": %s", dir,
-                            de_last_error()));
-    }
-
-    if (de_flush_seq(idx) != seq) {
-      seq = de_flush_seq(idx);
-      start = i;
-    }
-  }
-
-  if (seq != ckpt_seq) {
-    for (i = start; i < n; i++)
-      DEBufferAppend(index, &entries[i], seq);
-  }
-  pfree(entries);
-
-  return idx;
-}
-
-void de_close_index(Relation index, DEIndex *idx) {
-  de_close(idx);
-  UnlockRelation(index, ShareUpdateExclusiveLock);
 }
 
 /*

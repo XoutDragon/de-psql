@@ -62,7 +62,7 @@ IndexBuildResult *debuild(Relation heap, Relation index, IndexInfo *indexInfo) {
   de_create(path);
   DEInitMetapage(index);
 
-  bs.idx = de_open_index(index);
+  bs.idx = de_acquire_index(index);
   bs.index = index;
   bs.indtuples = 0;
   bs.cap = 1024;
@@ -74,12 +74,14 @@ IndexBuildResult *debuild(Relation heap, Relation index, IndexInfo *indexInfo) {
   reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
                                      debuildcallback, (void *)&bs, NULL);
 
-  for (i = 0; i < bs.npending; i++)
+  for (i = 0; i < bs.npending; i++) {
     DEBufferAppend(index, &bs.pending[i], bs.last_seq);
+    de_cache_sync(index);
+  }
 
   pfree(bs.pending);
 
-  de_close_index(index, bs.idx);
+  de_release_index(index, bs.idx);
   result = palloc_object(IndexBuildResult);
   result->heap_tuples = reltuples;
   result->index_tuples = bs.indtuples;
@@ -109,13 +111,13 @@ bool deinsert(Relation index, Datum *values, bool *isnull, ItemPointer ht_ctid,
   if (isnull[0])
     return false;
 
-  idx = de_open_index(index);
+  idx = de_acquire_index(index);
   key = DatumGetInt32(values[0]);
 
   packed_tid = ((uint64)ItemPointerGetBlockNumber(ht_ctid) << 16) |
                ItemPointerGetOffsetNumber(ht_ctid);
   if (de_insert(idx, key, packed_tid) != 0) {
-    de_close_index(index, idx);
+    de_discard_index(index, idx);
 
     ereport(ERROR, errmsg("Insert into index failed"));
   }
@@ -125,8 +127,9 @@ bool deinsert(Relation index, Datum *values, bool *isnull, ItemPointer ht_ctid,
   e.tombstone = false;
 
   DEBufferAppend(index, &e, de_flush_seq(idx));
+  de_cache_sync(index);
 
-  de_close_index(index, idx);
+  de_release_index(index, idx);
   /* The function's Boolean result value is significant only when checkUnique is
   UNIQUE_CHECK_PARTIAL. In this case a true result means the new entry is known
   unique, whereas false means it might be non-unique (and a deferred uniqueness

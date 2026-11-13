@@ -13,8 +13,8 @@
 
 #define DE_DATA_DIR "dynamic_ext"
 
-#define DEFAULT_DE_BUFFER_LWM 1000
-#define DEFAULT_DE_BUFFER_HWM 2000
+#define DEFAULT_DE_BUFFER_LWM 10000
+#define DEFAULT_DE_BUFFER_HWM 20000
 #define DEFAULT_DE_SCALE_FACTOR 8
 
 #define MIN_DE_BUFFER_LWM 1
@@ -25,18 +25,15 @@
 #define MAX_DE_BUFFER_HWM 10000000
 #define MAX_DE_SCALE_FACTOR 64
 
-
-typedef struct DEScanOpaqueData 
-{
-  bool done;  // check if a scan was done.
-  uint64 *tids;  // array of tids returned by de_range
+typedef struct DEScanOpaqueData {
+  bool done;    // check if a scan was done.
+  uint64 *tids; // array of tids returned by de_range
   size_t count; // How many tids are in the tid array
-  size_t pos;  // index of next TID to return
+  size_t pos;   // index of next TID to return
 } DEScanOpaqueData;
 
-typedef struct DEOptions
-{
-  int32 vl_len_; // header 
+typedef struct DEOptions {
+  int32 vl_len_; // header
   size_t buffer_lwm;
   size_t buffer_hwm;
   size_t scale_factor;
@@ -45,16 +42,17 @@ typedef struct DEOptions
 typedef DEScanOpaqueData *DEScanOpaque;
 
 typedef struct DEMetaPageData {
-  uint32 magic;  
-  uint64 flush_seq;  
-  BlockNumber npages; 
+  uint32 magic;
+  uint64 flush_seq;
+  BlockNumber npages;
   uint32 epoch;
 } DEMetaPageData;
 
 #define DE_METAPAGE_BLKNO (0)
 #define DE_MAGICK_NUMBER (0xDBAC0DED)
-#define DE_ENTRIES_PER_PAGE \
-  ((BLCKSZ - SizeOfPageHeaderData) / (MAXALIGN(sizeof(DEBufEntry)) + sizeof(ItemIdData)))
+#define DE_ENTRIES_PER_PAGE                                                    \
+  ((BLCKSZ - SizeOfPageHeaderData) /                                           \
+   (MAXALIGN(sizeof(DEBufEntry)) + sizeof(ItemIdData)))
 
 typedef struct DEBufEntry {
   int32 key;
@@ -62,8 +60,7 @@ typedef struct DEBufEntry {
   bool tombstone;
 } DEBufEntry;
 
-typedef struct DEBuildState 
-{
+typedef struct DEBuildState {
   DEIndex *idx;
   Relation index;
   double indtuples;
@@ -73,13 +70,22 @@ typedef struct DEBuildState
   uint64 last_seq;
 } DEBuildState;
 
+typedef struct DEPending {
+  DEBufEntry *entries;
+  int n;
+  int cap;
+  uint64 seq;
+} DEPending;
 
 /* deutils.c */
 extern void DEFillMetapage(Relation index, Page metaPage);
 extern void DEInitMetapage(Relation index);
-extern void DEBufferAppend(Relation index, const DEBufEntry *e, uint64 flush_seq);
-extern void DEReadMeta(Relation index, uint64 *flush_seq, uint32 *nentries, BlockNumber *npages, uint32 *epoch);
-extern DEBufEntry *DEBufferRead(Relation index, uint64 ckpt_flush_seq, uint32 skip, int *n);
+extern void DEBufferAppendMany(Relation index, const DEBufEntry *entries, int n,
+                               uint64 flush_seq);
+extern void DEReadMeta(Relation index, uint64 *flush_seq, uint32 *nentries,
+                       BlockNumber *npages, uint32 *epoch);
+extern DEBufEntry *DEBufferRead(Relation index, uint64 ckpt_flush_seq,
+                                uint32 skip, int *n);
 extern void DEBumpEpoch(Relation index);
 extern Datum dynamic_ext(PG_FUNCTION_ARGS);
 extern DEIndex *de_acquire_index(Relation index);
@@ -99,6 +105,7 @@ extern bool deinsert(Relation index, Datum *values, bool *isnull,
                      ItemPointer ht_ctid, Relation heapRel,
                      IndexUniqueCheck checkUnique, bool indexUnchanged,
                      struct IndexInfo *indexInfo);
+extern void deinsertcleanup(Relation index, IndexInfo *indexInfo);
 extern IndexBulkDeleteResult *debulkdelete(IndexVacuumInfo *info,
                                            IndexBulkDeleteResult *stats,
                                            IndexBulkDeleteCallback callback,

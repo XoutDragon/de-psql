@@ -116,6 +116,7 @@ Datum dynamic_ext(PG_FUNCTION_ARGS) {
   amroutine->ambuild = debuild;
   amroutine->ambuildempty = debuildempty;
   amroutine->aminsert = deinsert;
+  amroutine->aminsertcleanup = deinsertcleanup;
   amroutine->ambulkdelete = debulkdelete;
   amroutine->amvacuumcleanup = devacuumcleanup;
   amroutine->amcostestimate = decostestimate;
@@ -184,63 +185,71 @@ void DEInitMetapage(Relation index) {
   UnlockReleaseBuffer(metaBuffer);
 }
 
-void DEBufferAppend(Relation index, const DEBufEntry *e, uint64 flush_seq) {
-  Buffer metaBuffer;
-  Buffer buffer = InvalidBuffer;
-  Page page = NULL;
-  DEMetaPageData *metadata;
-  GenericXLogState *state;
-  BlockNumber npages;
+void DEBufferAppendMany(Relation index, const DEBufEntry *entries, int n,
+                        uint64 flush_seq) {
+  int done = 0;
 
-  metaBuffer = ReadBuffer(index, DE_METAPAGE_BLKNO);
-  LockBuffer(metaBuffer, BUFFER_LOCK_EXCLUSIVE);
-  metadata = (DEMetaPageData *)PageGetContents(BufferGetPage(metaBuffer));
-  if (metadata->magic != DE_MAGICK_NUMBER)
-    elog(ERROR, "dynamic_ext: index \"%s\" has no metapage",
-         RelationGetRelationName(index));
+  while (done < n) {
+    Buffer metaBuffer;
+    Buffer buffer = InvalidBuffer;
+    Page page = NULL;
+    DEMetaPageData *metadata;
+    GenericXLogState *state;
+    BlockNumber npages;
 
-  npages = (metadata->flush_seq == flush_seq) ? metadata->npages : 0;
+    metaBuffer = ReadBuffer(index, DE_METAPAGE_BLKNO);
+    LockBuffer(metaBuffer, BUFFER_LOCK_EXCLUSIVE);
+    metadata = (DEMetaPageData *)PageGetContents(BufferGetPage(metaBuffer));
+    if (metadata->magic != DE_MAGICK_NUMBER)
+      elog(ERROR, "dynamic_ext: index \"%s\" has no metapage",
+           RelationGetRelationName(index));
 
-  state = GenericXLogStart(index);
+    npages = (metadata->flush_seq == flush_seq) ? metadata->npages : 0;
 
-  if (npages > 0) {
-    buffer = ReadBuffer(index, npages);
-    LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
-    if (PageGetFreeSpace(BufferGetPage(buffer)) >= MAXALIGN(sizeof(DEBufEntry)))
-      page = GenericXLogRegisterBuffer(state, buffer, 0);
-    else {
-      UnlockReleaseBuffer(buffer);
-      buffer = InvalidBuffer;
-    }
-  }
+    state = GenericXLogStart(index);
 
-  if (page == NULL) {
-    BlockNumber blkno = npages + 1;
-    Page metaPage = GenericXLogRegisterBuffer(state, metaBuffer, 0);
-
-    metadata = (DEMetaPageData *)PageGetContents(metaPage);
-    metadata->flush_seq = flush_seq;
-    metadata->npages = blkno;
-
-    if (blkno < RelationGetNumberOfBlocks(index)) {
-      buffer = ReadBuffer(index, blkno);
+    if (npages > 0) {
+      buffer = ReadBuffer(index, npages);
       LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
-    } else {
-      buffer =
-          ExtendBufferedRel(BMR_REL(index), MAIN_FORKNUM, NULL, EB_LOCK_FIRST);
+      if (PageGetFreeSpace(BufferGetPage(buffer)) >=
+          MAXALIGN(sizeof(DEBufEntry)))
+        page = GenericXLogRegisterBuffer(state, buffer, 0);
+      else {
+        UnlockReleaseBuffer(buffer);
+        buffer = InvalidBuffer;
+      }
     }
-    page = GenericXLogRegisterBuffer(state, buffer, GENERIC_XLOG_FULL_IMAGE);
-    PageInit(page, BLCKSZ, 0);
-  }
 
-  if (PageAddItem(page, (Item)e, sizeof(DEBufEntry), InvalidOffsetNumber, false,
-                  false) == InvalidOffsetNumber) {
-    elog(ERROR, "dynamic_ext: could not add entry to buffer page");
-  }
+    if (page == NULL) {
+      BlockNumber blkno = npages + 1;
+      Page metaPage = GenericXLogRegisterBuffer(state, metaBuffer, 0);
 
-  GenericXLogFinish(state);
-  UnlockReleaseBuffer(buffer);
-  UnlockReleaseBuffer(metaBuffer);
+      metadata = (DEMetaPageData *)PageGetContents(metaPage);
+      metadata->flush_seq = flush_seq;
+      metadata->npages = blkno;
+
+      if (blkno < RelationGetNumberOfBlocks(index)) {
+        buffer = ReadBuffer(index, blkno);
+        LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+      } else {
+        buffer = ExtendBufferedRel(BMR_REL(index), MAIN_FORKNUM, NULL,
+                                   EB_LOCK_FIRST);
+      }
+      page = GenericXLogRegisterBuffer(state, buffer, GENERIC_XLOG_FULL_IMAGE);
+      PageInit(page, BLCKSZ, 0);
+    }
+
+    while (done < n && PageGetFreeSpace(page) >= MAXALIGN(sizeof(DEBufEntry))) {
+      if (PageAddItem(page, (Item)&entries[done], sizeof(DEBufEntry),
+                      InvalidOffsetNumber, false, false) == InvalidOffsetNumber)
+        elog(ERROR, "dynamic_ext: could not add entry to buffer page");
+      done++;
+    }
+
+    GenericXLogFinish(state);
+    UnlockReleaseBuffer(buffer);
+    UnlockReleaseBuffer(metaBuffer);
+  }
 }
 
 void DEReadMeta(Relation index, uint64 *flush_seq, uint32 *nentries,

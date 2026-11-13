@@ -1,0 +1,27 @@
+run 1  n  1-row:     latency average = 0.523 ms
+run 1  n  1000-row:  latency average = 1.214 ms
+run 1  n  1M-row:    Time: 665.835 ms
+run 1  b  1-row:     latency average = 0.483 ms
+run 1  b  1000-row:  latency average = 2.876 ms
+run 1  b  1M-row:    Time: 2511.571 ms (00:02.512)
+run 1  d  1-row:     latency average = 0.515 ms
+run 1  d  1000-row:  latency average = 3.596 ms
+run 1  d  1M-row:    Time: 2900.587 ms (00:02.901)
+run 2  n  1-row:     latency average = 0.524 ms
+run 2  n  1000-row:  latency average = 1.183 ms
+run 2  n  1M-row:    Time: 629.305 ms
+run 2  b  1-row:     latency average = 0.502 ms
+run 2  b  1000-row:  
+run 2  b  1M-row:    
+run 2  d  1-row:     
+run 2  d  1000-row:  
+run 2  d  1M-row:    Time: 3053.476 ms (00:03.053)
+run 3  n  1-row:     latency average = 0.501 ms
+run 3  n  1000-row:  latency average = 1.149 ms
+run 3  n  1M-row:    Time: 654.656 ms
+run 3  b  1-row:     latency average = 0.508 ms
+run 3  b  1000-row:  latency average = 2.842 ms
+run 3  b  1M-row:    Time: 2488.462 ms (00:02.488)
+run 3  d  1-row:     latency average = 0.513 ms
+run 3  d  1000-row:  latency average = 3.636 ms
+run 3  d  1M-row:    Time: 2938.049 ms (00:02.938)

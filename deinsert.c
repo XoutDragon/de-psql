@@ -4,6 +4,7 @@
 #include "access/tableam.h"
 #include "dynamic_ext.h"
 #include "storage/itemptr.h"
+#include "utils/palloc.h"
 #include "utils/rel.h"
 
 PG_MODULE_MAGIC_EXT(.name = "dynamic_ext", .version = PG_VERSION);
@@ -52,7 +53,6 @@ IndexBuildResult *debuild(Relation heap, Relation index, IndexInfo *indexInfo) {
   DEBuildState bs;
   double reltuples;
   char path[MAXPGPATH];
-  int i;
 
   de_remove_orphan_dirs();
   if (index->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED)
@@ -75,10 +75,8 @@ IndexBuildResult *debuild(Relation heap, Relation index, IndexInfo *indexInfo) {
   reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
                                      debuildcallback, (void *)&bs, NULL);
 
-  for (i = 0; i < bs.npending; i++) {
-    DEBufferAppend(index, &bs.pending[i], bs.last_seq);
-    de_cache_sync(index);
-  }
+  DEBufferAppendMany(index, bs.pending, bs.npending, bs.last_seq);
+  de_cache_sync(index);
 
   pfree(bs.pending);
 
@@ -108,6 +106,8 @@ bool deinsert(Relation index, Datum *values, bool *isnull, ItemPointer ht_ctid,
   int32 key;
   uint64 packed_tid;
   DEBufEntry e;
+  DEPending *p;
+  uint64 seq;
 
   if (isnull[0])
     return false;
@@ -127,8 +127,30 @@ bool deinsert(Relation index, Datum *values, bool *isnull, ItemPointer ht_ctid,
   e.tid = packed_tid;
   e.tombstone = false;
 
-  DEBufferAppend(index, &e, de_flush_seq(idx));
-  de_cache_sync(index);
+  p = (DEPending *)indexInfo->ii_AmCache;
+  seq = de_flush_seq(idx);
+
+  if (p == NULL) {
+    p = MemoryContextAllocZero(indexInfo->ii_Context, sizeof(DEPending));
+    p->cap = 1024;
+    p->entries =
+        MemoryContextAlloc(indexInfo->ii_Context, p->cap * sizeof(DEBufEntry));
+    p->seq = seq;
+    indexInfo->ii_AmCache = p;
+  }
+
+  if (seq != p->seq) {
+    p->n = 0;
+    p->seq = seq;
+    DEBufferAppendMany(index, &e, 1, seq);
+    de_cache_sync(index);
+  } else {
+    if (p->n == p->cap) {
+      p->cap *= 2;
+      p->entries = repalloc(p->entries, p->cap * sizeof(DEBufEntry));
+    }
+    p->entries[p->n++] = e;
+  }
 
   de_release_index(index, idx);
   /* The function's Boolean result value is significant only when checkUnique is
@@ -138,4 +160,14 @@ bool deinsert(Relation index, Datum *values, bool *isnull, ItemPointer ht_ctid,
   recommended.
   */
   return false;
+}
+
+void deinsertcleanup(Relation index, IndexInfo *indexInfo) {
+  DEPending *p = (DEPending *)indexInfo->ii_AmCache;
+
+  if (p != NULL && p->n > 0) {
+    DEBufferAppendMany(index, p->entries, p->n, p->seq);
+    de_cache_sync(index);
+    p->n = 0;
+  }
 }

@@ -97,7 +97,7 @@ static int de_replay_entries(Relation index, DEIndex *idx, DEBufEntry *entries,
 
   if (seq != before)
     for (i = start; i < n; i++)
-      DEBufferAppend(index, &entries[i], seq);
+      DEBufferAppendMany(index, &entries[i], 1, seq);
   return 0;
 }
 

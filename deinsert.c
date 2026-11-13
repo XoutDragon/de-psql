@@ -54,6 +54,7 @@ IndexBuildResult *debuild(Relation heap, Relation index, IndexInfo *indexInfo) {
   char path[MAXPGPATH];
   int i;
 
+  de_remove_orphan_dirs();
   if (index->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED)
     ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                     errmsg("dynamic_ext does not support UNLOGGED indexes")));

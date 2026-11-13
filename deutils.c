@@ -1,3 +1,4 @@
+#include "c.h"
 #include "postgres.h"
 
 #include "access/generic_xlog.h"
@@ -8,10 +9,14 @@
 #include "storage/buf.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
+#include "storage/fd.h"
 #include "storage/lockdefs.h"
 #include "storage/off.h"
+#include "sys/stat.h"
 #include "utils/rel.h"
+#include <asm-generic/errno-base.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 PG_FUNCTION_INFO_V1(dynamic_ext);
 
@@ -332,7 +337,8 @@ DEBufEntry *DEBufferRead(Relation index, uint64 ckpt_flush_seq, uint32 skip,
 }
 
 void de_index_dir(char *path, Oid dbOid, RelFileNumber relNumber) {
-  snprintf(path, MAXPGPATH, "%s/dynamic_ext/%u/%u", DataDir, dbOid, relNumber);
+  snprintf(path, MAXPGPATH, "%s/" DE_DATA_DIR "/%u/%u", DataDir, dbOid,
+           relNumber);
 }
 
 /*
@@ -354,4 +360,37 @@ bytea *deoptions(Datum reloptions, bool validate) {
   }
 
   return (bytea *)rdopts;
+}
+
+/*
+ * Clean up orphaned shard directorties.
+ */
+
+void de_remove_orphan_dirs(void) {
+  char dedir[MAXPGPATH];
+  char pgfile[MAXPGPATH];
+  char folder[MAXPGPATH];
+  struct stat st;
+  DIR *dir;
+  struct dirent *de;
+
+  snprintf(dedir, MAXPGPATH, "%s/" DE_DATA_DIR "/%u", DataDir, MyDatabaseId);
+
+  dir = AllocateDir(dedir);
+  if (dir == NULL)
+    return;
+
+  while ((de = ReadDir(dir, dedir)) != NULL) {
+    if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+      continue;
+
+    snprintf(pgfile, MAXPGPATH, "%s/base/%u/%s", DataDir, MyDatabaseId,
+             de->d_name);
+
+    if (stat(pgfile, &st) < 0 && errno == ENOENT) {
+      snprintf(folder, MAXPGPATH, "%s/%s", dedir, de->d_name);
+      rmtree(folder, true);
+    }
+  }
+  FreeDir(dir);
 }

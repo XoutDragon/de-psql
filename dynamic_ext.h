@@ -11,6 +11,8 @@
 #include "nodes/pathnodes.h"
 #include "storage/block.h"
 
+#define DE_DATA_DIR "dynamic_ext"
+
 #define DEFAULT_DE_BUFFER_LWM 1000
 #define DEFAULT_DE_BUFFER_HWM 2000
 #define DEFAULT_DE_SCALE_FACTOR 8
@@ -113,5 +115,6 @@ extern void derescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,
                      ScanKey orderbys, int norderbys);
 extern bool degettuple(IndexScanDesc scan, ScanDirection dir);
 extern void deendscan(IndexScanDesc scan);
+extern void de_remove_orphan_dirs(void);
 
 #endif

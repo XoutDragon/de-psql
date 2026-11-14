@@ -1,3 +1,4 @@
+#include "c.h"
 #include "de_shim.h"
 #include "postgres.h"
 
@@ -112,32 +113,33 @@ bool deinsert(Relation index, Datum *values, bool *isnull, ItemPointer ht_ctid,
   if (isnull[0])
     return false;
 
-  idx = de_acquire_index(index);
+  p = (DEPending *)indexInfo->ii_AmCache;
+
+  if (p == NULL) {
+    p = MemoryContextAllocZero(indexInfo->ii_Context, sizeof(DEPending));
+    p->idx = de_acquire_index(index);
+    p->cap = 1024;
+    p->entries =
+        MemoryContextAlloc(indexInfo->ii_Context, p->cap * sizeof(DEBufEntry));
+    p->seq = de_flush_seq(p->idx);
+    indexInfo->ii_AmCache = p;
+  }
+  idx = p->idx;
+
   key = DatumGetInt32(values[0]);
 
   packed_tid = ((uint64)ItemPointerGetBlockNumber(ht_ctid) << 16) |
                ItemPointerGetOffsetNumber(ht_ctid);
   if (de_insert(idx, key, packed_tid) != 0) {
     de_discard_index(index, idx);
-
+    p->idx = NULL;
     ereport(ERROR, errmsg("Insert into index failed"));
   }
 
+  seq = de_flush_seq(idx);
   e.key = key;
   e.tid = packed_tid;
   e.tombstone = false;
-
-  p = (DEPending *)indexInfo->ii_AmCache;
-  seq = de_flush_seq(idx);
-
-  if (p == NULL) {
-    p = MemoryContextAllocZero(indexInfo->ii_Context, sizeof(DEPending));
-    p->cap = 1024;
-    p->entries =
-        MemoryContextAlloc(indexInfo->ii_Context, p->cap * sizeof(DEBufEntry));
-    p->seq = seq;
-    indexInfo->ii_AmCache = p;
-  }
 
   if (seq != p->seq) {
     p->n = 0;
@@ -152,7 +154,6 @@ bool deinsert(Relation index, Datum *values, bool *isnull, ItemPointer ht_ctid,
     p->entries[p->n++] = e;
   }
 
-  de_release_index(index, idx);
   /* The function's Boolean result value is significant only when checkUnique is
   UNIQUE_CHECK_PARTIAL. In this case a true result means the new entry is known
   unique, whereas false means it might be non-unique (and a deferred uniqueness
@@ -169,5 +170,10 @@ void deinsertcleanup(Relation index, IndexInfo *indexInfo) {
     DEBufferAppendMany(index, p->entries, p->n, p->seq);
     de_cache_sync(index);
     p->n = 0;
+  }
+
+  if (p != NULL && p->idx != NULL) {
+    de_release_index(index, p->idx);
+    p->idx = NULL;
   }
 }

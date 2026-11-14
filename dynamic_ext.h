@@ -71,6 +71,7 @@ typedef struct DEBuildState {
 } DEBuildState;
 
 typedef struct DEPending {
+  DEIndex *idx;
   DEBufEntry *entries;
   int n;
   int cap;

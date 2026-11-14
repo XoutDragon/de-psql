@@ -1,27 +1,27 @@
-run 1  n  1-row:     latency average = 0.501 ms
-run 1  n  1000-row:  latency average = 1.310 ms
-run 1  n  1M-row:    Time: 692.159 ms
-run 1  b  1-row:     latency average = 0.498 ms
-run 1  b  1000-row:  latency average = 3.069 ms
-run 1  b  1M-row:    Time: 2798.108 ms (00:02.798)
-run 1  d  1-row:     latency average = 0.521 ms
-run 1  d  1000-row:  latency average = 3.443 ms
-run 1  d  1M-row:    Time: 2723.910 ms (00:02.724)
-run 2  n  1-row:     latency average = 0.495 ms
-run 2  n  1000-row:  latency average = 1.224 ms
-run 2  n  1M-row:    Time: 691.733 ms
-run 2  b  1-row:     latency average = 0.524 ms
-run 2  b  1000-row:  latency average = 3.117 ms
-run 2  b  1M-row:    Time: 2789.404 ms (00:02.789)
-run 2  d  1-row:     latency average = 0.539 ms
-run 2  d  1000-row:  latency average = 3.409 ms
-run 2  d  1M-row:    Time: 2738.025 ms (00:02.738)
-run 3  n  1-row:     latency average = 0.496 ms
-run 3  n  1000-row:  latency average = 1.231 ms
-run 3  n  1M-row:    Time: 696.653 ms
-run 3  b  1-row:     latency average = 0.515 ms
-run 3  b  1000-row:  latency average = 3.267 ms
-run 3  b  1M-row:    Time: 2899.319 ms (00:02.899)
-run 3  d  1-row:     latency average = 0.534 ms
-run 3  d  1000-row:  latency average = 3.476 ms
-run 3  d  1M-row:    Time: 2819.696 ms (00:02.820)
+run 1  n  1-row:     latency average = 0.494 ms
+run 1  n  1000-row:  latency average = 1.263 ms
+run 1  n  1M-row:    Time: 659.847 ms
+run 1  b  1-row:     latency average = 0.523 ms
+run 1  b  1000-row:  latency average = 2.959 ms
+run 1  b  1M-row:    Time: 2526.651 ms (00:02.527)
+run 1  d  1-row:     latency average = 0.532 ms
+run 1  d  1000-row:  latency average = 2.380 ms
+run 1  d  1M-row:    Time: 1764.154 ms (00:01.764)
+run 2  n  1-row:     latency average = 0.499 ms
+run 2  n  1000-row:  latency average = 1.223 ms
+run 2  n  1M-row:    Time: 644.886 ms
+run 2  b  1-row:     latency average = 0.515 ms
+run 2  b  1000-row:  latency average = 2.881 ms
+run 2  b  1M-row:    Time: 2531.908 ms (00:02.532)
+run 2  d  1-row:     latency average = 0.536 ms
+run 2  d  1000-row:  latency average = 2.659 ms
+run 2  d  1M-row:    Time: 1967.752 ms (00:01.968)
+run 3  n  1-row:     latency average = 0.530 ms
+run 3  n  1000-row:  latency average = 1.250 ms
+run 3  n  1M-row:    Time: 643.569 ms
+run 3  b  1-row:     latency average = 0.492 ms
+run 3  b  1000-row:  latency average = 2.892 ms
+run 3  b  1M-row:    Time: 2622.391 ms (00:02.622)
+run 3  d  1-row:     latency average = 0.504 ms
+run 3  d  1000-row:  latency average = 2.360 ms
+run 3  d  1M-row:    Time: 1752.404 ms (00:01.752)

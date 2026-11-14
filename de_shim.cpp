@@ -203,8 +203,15 @@ extern "C" void de_close(DEIndex *idx) {
 }
 
 extern "C" int de_insert(DEIndex *idx, int64_t key, uint64_t tid) {
+  /* no flush coming: no files touched, so no need to enter the index folder */
+  if (!idx->ext->will_flush())
+    return guarded([&] {
+      if (!idx->ext->insert({key, tid}))
+        throw std::runtime_error("dynamic extension buffer is full");
+    });
+
+  /* this insert flushes: shards are written relative to the index folder */
   return in_index_dir(idx, [&] {
-    /* returns 0 only when the buffer is at its high watermark */
     if (!idx->ext->insert({key, tid}))
       throw std::runtime_error("dynamic extension buffer is full");
   });

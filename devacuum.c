@@ -59,7 +59,7 @@ IndexBulkDeleteResult *debulkdelete(IndexVacuumInfo *info,
       e.key = (int32)keys[i];
       e.tid = tids[i];
       e.tombstone = true;
-      DEBufferAppend(info->index, &e, de_flush_seq(idx));
+      DEBufferAppendMany(info->index, &e, 1, de_flush_seq(idx));
       de_cache_sync(info->index);
     }
     de_release_index(info->index, idx);

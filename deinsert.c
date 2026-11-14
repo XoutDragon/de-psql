@@ -1,9 +1,11 @@
+#include "c.h"
 #include "de_shim.h"
 #include "postgres.h"
 
 #include "access/tableam.h"
 #include "dynamic_ext.h"
 #include "storage/itemptr.h"
+#include "utils/palloc.h"
 #include "utils/rel.h"
 
 PG_MODULE_MAGIC_EXT(.name = "dynamic_ext", .version = PG_VERSION);
@@ -52,7 +54,6 @@ IndexBuildResult *debuild(Relation heap, Relation index, IndexInfo *indexInfo) {
   DEBuildState bs;
   double reltuples;
   char path[MAXPGPATH];
-  int i;
 
   de_remove_orphan_dirs();
   if (index->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED)
@@ -75,10 +76,8 @@ IndexBuildResult *debuild(Relation heap, Relation index, IndexInfo *indexInfo) {
   reltuples = table_index_build_scan(heap, index, indexInfo, true, true,
                                      debuildcallback, (void *)&bs, NULL);
 
-  for (i = 0; i < bs.npending; i++) {
-    DEBufferAppend(index, &bs.pending[i], bs.last_seq);
-    de_cache_sync(index);
-  }
+  DEBufferAppendMany(index, bs.pending, bs.npending, bs.last_seq);
+  de_cache_sync(index);
 
   pfree(bs.pending);
 
@@ -108,29 +107,53 @@ bool deinsert(Relation index, Datum *values, bool *isnull, ItemPointer ht_ctid,
   int32 key;
   uint64 packed_tid;
   DEBufEntry e;
+  DEPending *p;
+  uint64 seq;
 
   if (isnull[0])
     return false;
 
-  idx = de_acquire_index(index);
+  p = (DEPending *)indexInfo->ii_AmCache;
+
+  if (p == NULL) {
+    p = MemoryContextAllocZero(indexInfo->ii_Context, sizeof(DEPending));
+    p->idx = de_acquire_index(index);
+    p->cap = 1024;
+    p->entries =
+        MemoryContextAlloc(indexInfo->ii_Context, p->cap * sizeof(DEBufEntry));
+    p->seq = de_flush_seq(p->idx);
+    indexInfo->ii_AmCache = p;
+  }
+  idx = p->idx;
+
   key = DatumGetInt32(values[0]);
 
   packed_tid = ((uint64)ItemPointerGetBlockNumber(ht_ctid) << 16) |
                ItemPointerGetOffsetNumber(ht_ctid);
   if (de_insert(idx, key, packed_tid) != 0) {
     de_discard_index(index, idx);
-
+    p->idx = NULL;
     ereport(ERROR, errmsg("Insert into index failed"));
   }
 
+  seq = de_flush_seq(idx);
   e.key = key;
   e.tid = packed_tid;
   e.tombstone = false;
 
-  DEBufferAppend(index, &e, de_flush_seq(idx));
-  de_cache_sync(index);
+  if (seq != p->seq) {
+    p->n = 0;
+    p->seq = seq;
+    DEBufferAppendMany(index, &e, 1, seq);
+    de_cache_sync(index);
+  } else {
+    if (p->n == p->cap) {
+      p->cap *= 2;
+      p->entries = repalloc(p->entries, p->cap * sizeof(DEBufEntry));
+    }
+    p->entries[p->n++] = e;
+  }
 
-  de_release_index(index, idx);
   /* The function's Boolean result value is significant only when checkUnique is
   UNIQUE_CHECK_PARTIAL. In this case a true result means the new entry is known
   unique, whereas false means it might be non-unique (and a deferred uniqueness
@@ -138,4 +161,19 @@ bool deinsert(Relation index, Datum *values, bool *isnull, ItemPointer ht_ctid,
   recommended.
   */
   return false;
+}
+
+void deinsertcleanup(Relation index, IndexInfo *indexInfo) {
+  DEPending *p = (DEPending *)indexInfo->ii_AmCache;
+
+  if (p != NULL && p->n > 0) {
+    DEBufferAppendMany(index, p->entries, p->n, p->seq);
+    de_cache_sync(index);
+    p->n = 0;
+  }
+
+  if (p != NULL && p->idx != NULL) {
+    de_release_index(index, p->idx);
+    p->idx = NULL;
+  }
 }
